@@ -1,0 +1,8 @@
+# Secrets & Environments
+.env
+
+# Python compilation artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
