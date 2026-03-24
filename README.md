@@ -47,14 +47,6 @@ cd graphflow-ai
    npm run dev
    ```
 
-## 🌟 Features
-
-- **Natural Language to Cypher**: Convert plain English questions into Neo4j queries automatically.  
-- **Dynamic Graph Visualization**: Explore Customers, Orders, Deliveries, Invoices, and their relationships.  
-- **Intelligent Flow Tracing**: Visualize complete fulfillment journeys from a single Order ID.  
-- **Rich Chat UX**: Summarized answers with Markdown, tables, and highlights.  
-- **Interactive & Responsive**: Zoom, pan, and inspect nodes/relationships with ease.
-
 ## 🔒 Security & Secrets
 - **DO NOT** commit your `.env` file. It is already included in `.gitignore`.
 - Always use the `.env.example` template for sharing configuration structures.
