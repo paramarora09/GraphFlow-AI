@@ -29,16 +29,15 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI
 app = FastAPI(title="SAP O2C Graph AI Copilot")
 
-# CORS Middleware Setup
-# CORS Middleware Setup
+# Enable CORS for React Frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://graph-flow-ai.vercel.app",  # your exact Vercel frontend
+        "https://graph-flow-ai.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",  # allows Vercel preview deploys
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -87,26 +86,16 @@ Answer ONLY 'YES' or 'NO'."""
     try:
         response = client.models.generate_content(model=MODEL_ID, contents=prompt)
         return "YES" in response.text.upper()
-    except Exception as e:
-        if "503" in str(e) or "UNAVAILABLE" in str(e).upper():
-            raise RuntimeError("Gemini AI is currently overloaded. Please try again later.")
+    except:
         return True
 
 def generate_cypher_from_nl(question: str, error_feedback: str = None) -> str:
     """ Translates NL to Cypher using few-shot prompting and error feedback. """
     schema_context = """
-    Nodes: Customer(id, name), Order(id, status, total_amount, order_date), Product(id, unit, category), 
-           Delivery(id, status, shipping_point), Invoice(id, total_amount, issue_date, accounting_document, is_cancelled), Plant(id, name).
-    Relationships: 
-      (Customer)-[PLACED]->(Order), 
-      (Order)-[CONTAINS]->(Product), 
-      (Delivery)-[FULFILLS]->(Order),
-      (Invoice)-[BILLED_TO]->(Customer), 
-      (Invoice)-[BILLED_FOR]->(Product), 
-      (Invoice)-[REFERENCES]->(Delivery),
-      (Product)-[MANUFACTURED_AT]->(Plant).
-    IMPORTANT: There is NO Payment node. There is NO DELIVERED_AS relationship.
-    Note: Delivery FULFILLS Order (direction: Delivery -> Order), so to find deliveries for an order, use: MATCH (d:Delivery)-[:FULFILLS]->(o:Order {id: 'xxx'})
+    Nodes: Customer(id, name, country), Order(id, status, total_amount, date), Product(id, name, category, price), 
+           Delivery(id, status, ship_date), Invoice(id, amount, status), Payment(id, method, date, amount).
+    Relationships: (Customer)-[PLACED]->(Order), (Order)-[CONTAINS]->(Product), (Order)-[DELIVERED_AS]->(Delivery),
+                   (Delivery)-[BILLED_FOR]->(Invoice), (Invoice)-[PAID_BY]->(Payment).
     """
     
     prompt = f"""You are a Neo4j Cypher expert. Convert the question into a valid Cypher query using this schema:
@@ -118,7 +107,6 @@ Rules:
    - Good: MATCH (c:Customer) RETURN c
    - Bad: MATCH (c:Customer) RETURN count(c)
 3. Output ONLY raw Cypher. No markdown.
-4. Use the exact relationship names and directions from the schema above.
 
 Question: "{question}"
 """
@@ -126,16 +114,14 @@ Question: "{question}"
         prompt += f"\nPrevious attempt failed with error: {error_feedback}. Please fix the syntax."
 
     try:
-        time.sleep(2)  # Safety for Free Tier
         response = client.models.generate_content(model=MODEL_ID, contents=prompt)
-        cypher = response.text.replace('```cypher', '').replace('```', '').strip()
+        cypher = response.text.strip().replace("```cypher", "").replace("```", "")
         return cypher
     except Exception as e:
         error_str = str(e).upper()
-        logger.error(f"Gemini error in generate_cypher_from_nl: {error_str}")
-        if "503" in error_str or "UNAVAILABLE" in error_str:
-            raise RuntimeError("Gemini AI is currently overloaded. Please try again later")
-        raise RuntimeError(f"Gemini API error: {e}")
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            raise HTTPException(status_code=429, detail="Gemini API limit reached. Pls wait.")
+        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
 
 def build_direct_answer(question: str, data: list) -> Optional[str]:
     """
@@ -176,16 +162,13 @@ def summarize_results_to_nl(question: str, data: list) -> str:
         return direct
 
     # Step 2: Use Gemini for complex results
-    prompt = f"Summarize this O2C data for the question '{question}': {str(data)[:8000]}"
+    prompt = f"Summarize this O2C data for the question '{question}': {str(data)[:1000]}"
     try:
         time.sleep(2)  # Safety for Free Tier
         response = client.models.generate_content(model=MODEL_ID, contents=prompt)
         return response.text.strip()
     except Exception as e:
-        error_str = str(e).upper()
-        if "503" in error_str or "UNAVAILABLE" in error_str:
-            return "Query successful, but the GraphFlow AI model is currently overloaded and cannot generate a summary. Please try again later."
-        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+        if "429" in str(e):
             return "Query successful, but I've reached my AI summary limit. Raw data is available below."
         return f"Query ran successfully. Here is the raw result: {str(data[0])}"
 
@@ -255,7 +238,7 @@ def get_fallback_cypher(question: str) -> Optional[str]:
 
 def detect_entity_label(cypher: str) -> Optional[str]:
     """Detects the primary node label from a Cypher query."""
-    for label in ["Customer", "Order", "Product", "Delivery", "Invoice", "Payment", "Plant"]:
+    for label in ["Customer", "Order", "Product", "Delivery", "Invoice", "Payment"]:
         if label.lower() in cypher.lower():
             return label
     return None
@@ -266,99 +249,72 @@ def detect_entity_label(cypher: str) -> Optional[str]:
 async def query_graph(request: QueryRequest):
     logger.info(f"Question: {request.question}")
     
-    try:
-        if not is_question_in_scope(request.question):
-            return QueryResponse(question=request.question, answer="That request is outside the scope of the SAP Order-to-Cash data. Please ask something related to orders, deliveries, or customers.", generated_cypher="", data=[], message="Out of scope", retries_used=0)
+    if not is_question_in_scope(request.question):
+        return QueryResponse(question=request.question, answer="Out of scope.", generated_cypher="", data=[], message="Blocked", retries_used=0)
 
-        max_retries = 3
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                if attempt > 0: time.sleep(attempt * 2)
-                
-                cypher = generate_cypher_from_nl(request.question, last_error)
-                logger.info(f"Generated Cypher: {cypher}")
-                results = execute_read_query(cypher)
-                logger.info(f"Neo4j returned {len(results)} records. Sample: {str(results[:1])[:200]}")
-                
-                # Improved detection: check if ANY value in the first row is a node/relationship list or dict
-                is_graph_data = False
-                if results and isinstance(results[0], dict):
-                    for val in results[0].values():
-                        if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict) and ("id" in val[0] or "start" in val[0]):
-                            is_graph_data = True
-                            break
-                        if isinstance(val, dict) and ("id" in val or "identity" in val):
-                            is_graph_data = True
-                            break
-                
-                answer = summarize_results_to_nl(request.question, results)
-                
-                if is_graph_data:
-                    return QueryResponse(question=request.question, answer=answer, generated_cypher=cypher, data=results, message="Success", retries_used=attempt)
-                else:
-                    graph_data = []
-                    label = detect_entity_label(cypher)
-                    significant_ids = []
-                    for row in results:
-                        if isinstance(row, dict):
-                            for k, v in row.items():
-                                if (isinstance(v, str) and v.isalnum() and len(v) >= 5) or ('id' in k.lower() and isinstance(v, str)):
-                                    significant_ids.append(v)
-                    
-                    if label and significant_ids:
-                        try:
-                            ids_str = str(significant_ids[:10])
-                            enrich_cypher = f"MATCH path = (n:{label})-[r]-(m) WHERE n.id IN {ids_str} RETURN path LIMIT 25"
-                            enrich_results = execute_read_query(enrich_cypher)
-                            
-                            if enrich_results:
-                                graph_data = enrich_results
-                            else:
-                                ids_str = str(significant_ids[:25])
-                                node_enrich_cypher = f"MATCH (n:{label}) WHERE n.id IN {ids_str} RETURN n LIMIT 25"
-                                node_results = execute_read_query(node_enrich_cypher)
-                                for rec in node_results:
-                                    node_data = list(rec.values())[0] if rec else {}
-                                    if isinstance(node_data, dict):
-                                        graph_data.append({
-                                            "nodes": [{"id": node_data.get("id"), "labels": [label], "properties": node_data}],
-                                            "relationships": []
-                                        })
-                        except Exception as enrich_err:
-                            logger.warning(f"Enrichment failed: {enrich_err}")
-                    
-                    final_data = graph_data if graph_data else results
-                    return QueryResponse(question=request.question, answer=answer, generated_cypher=cypher, data=final_data, message="Success", retries_used=attempt)
-
-            except (RuntimeError, ValueError) as e:
-                last_error = str(e)
-                logger.warning(f"Query attempt {attempt+1} failed: {last_error}")
-                fallback = get_fallback_cypher(request.question)
-                if fallback:
-                    res = execute_read_query(fallback)
-                    ans = summarize_results_to_nl(request.question, res)
-                    return QueryResponse(question=request.question, answer=ans, generated_cypher=fallback, data=res, message="Fallback used", retries_used=attempt)
-                if attempt == max_retries - 1:
-                    return QueryResponse(question=request.question, answer=f"I couldn't process this query. Error: {last_error}", generated_cypher="", data=[], message="Failed after retries", retries_used=attempt)
-
-    except Exception as global_err:
-        error_str = str(global_err).lower()
-        logger.error(f"FATAL ERROR in /query: {global_err}", exc_info=True)
-        
-        friendly_msg = "I encountered an internal error. Please ensure the Neo4j database is running and try again."
-        if "overloaded" in error_str or "503" in error_str:
-            friendly_msg = "The GraphFlow AI model is currently experiencing high demand. Please try your request again in about 30 seconds."
+    max_retries = 3
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0: time.sleep(attempt * 2)
             
-        return QueryResponse(
-            question=request.question,
-            answer=friendly_msg,
-            generated_cypher="",
-            data=[],
-            message=f"Error: {str(global_err)}",
-            retries_used=0
-        )
+            cypher = generate_cypher_from_nl(request.question, last_error)
+            logger.info(f"Generated Cypher: {cypher}")
+            results = execute_read_query(cypher)
+            logger.info(f"Neo4j returned {len(results)} records. Sample: {str(results[:1])[:200]}")
+            
+            # --- Determine if results are graph-ready or tabular ---
+            is_graph_data = (results and isinstance(results[0], dict) and "nodes" in results[0])
+            
+            # Build the NL answer from the raw results
+            answer = summarize_results_to_nl(request.question, results)
+            
+            if is_graph_data:
+                # Results are already path objects - send directly
+                return QueryResponse(question=request.question, answer=answer, generated_cypher=cypher, data=results, message="Success", retries_used=attempt)
+            else:
+                # Results are tabular (e.g., counts, lists). 
+                # Try to enrich with actual nodes for graph visualization.
+                graph_data = []
+                label = detect_entity_label(cypher)
+                if label:
+                    try:
+                        enrich_cypher = f"MATCH (n:{label}) RETURN n LIMIT 25"
+                        enrich_results = execute_read_query(enrich_cypher)
+                        # Convert node records to graph-compatible format
+                        for rec in enrich_results:
+                            for key, val in rec.items():
+                                if isinstance(val, dict) and "id" in val:
+                                    # Neo4j node returned as dict
+                                    pass
+                            # Build a simple node entry
+                            node_data = list(rec.values())[0] if rec else {}
+                            if isinstance(node_data, dict):
+                                node_id = node_data.get("id", "unknown")
+                                graph_data.append({
+                                    "nodes": [{"id": node_id, "labels": [label], "properties": node_data}],
+                                    "relationships": []
+                                })
+                        logger.info(f"Enriched graph with {len(graph_data)} {label} nodes")
+                    except Exception as enrich_err:
+                        logger.warning(f"Enrichment failed: {enrich_err}")
+                
+                final_data = graph_data if graph_data else results
+                return QueryResponse(question=request.question, answer=answer, generated_cypher=cypher, data=final_data, message="Success", retries_used=attempt)
+
+        except (RuntimeError, ValueError) as e:
+            last_error = str(e)
+            logger.warning(f"Query attempt {attempt+1} failed: {last_error}")
+            fallback = get_fallback_cypher(request.question)
+            if fallback:
+                res = execute_read_query(fallback)
+                ans = summarize_results_to_nl(request.question, res)
+                return QueryResponse(question=request.question, answer=ans, generated_cypher=fallback, data=res, message="Fallback used", retries_used=attempt)
+            if attempt == max_retries - 1:
+                raise HTTPException(status_code=422, detail=f"Failed: {last_error}")
+
+    raise HTTPException(status_code=422, detail="Exceeded retries")
 
 if __name__ == "__main__":
     import uvicorn
