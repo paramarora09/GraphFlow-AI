@@ -21,14 +21,20 @@ cd graphflow-ai
 ```
 
 ### 2. Backend Setup
-1. **Install Dependencies**:
+   1. ```bash
+      docker compose up -d
+      ```
+and navigate to http://localhost:7474/ and set up your neo4j credentials 
+Import your data to neo4j 
+
+2. **Install Dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
-2. **Configure Environment**:
+3. **Configure Environment**:
    - Copy `.env.example` to `.env`.
    - Add your **Neo4j** credentials and **Gemini API Key**.
-3. **Run the Server**:
+4. **Run the Server**:
    ```bash
    python main.py
    ```
