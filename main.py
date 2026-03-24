@@ -30,14 +30,15 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="SAP O2C Graph AI Copilot")
 
 # CORS Middleware Setup
+# CORS Middleware Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://graphflow-ai.vercel.app",  # Add your Vercel URL here
-        "https://*.vercel.app"              # Allows all your vercel preview deployments
+        "https://graph-flow-ai.vercel.app",  # your exact Vercel frontend
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",  # allows Vercel preview deploys
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
