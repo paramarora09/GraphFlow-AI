@@ -4,7 +4,7 @@ import ChatBox from './components/ChatBox';
 import GraphPanel from './components/GraphPanel';
 import NodeDetails from './components/NodeDetails';
 
-const API_URL = import.meta.env.VITE_API_URL || "https://graphflow-backend.onrender.com"; 
+const API_URL = "https://graphflow-ai.onrender.com";
 
 function App() {
   const [messages, setMessages] = useState([
